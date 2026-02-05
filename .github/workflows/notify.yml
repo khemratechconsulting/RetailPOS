@@ -1,0 +1,25 @@
+name: Pull Request
+
+on:
+  pull_request:
+    types: [opened, review_requested, closed, edited, reopened, synchronize]
+  issue_comment:
+    types: [created]
+
+jobs:
+  notify:
+    runs-on: ubuntu-latest
+    if: github.event_name == 'pull_request' || (github.event_name == 'issue_comment' && github.event.issue.pull_request)
+    steps:
+      - name: Send
+        uses: EverythingSuckz/github-telegram-notify@main
+        with:
+          bot_token: ${{ secrets.TELEGRAM_TOKEN }}
+          chat_id: ${{ secrets.TELEGRAM_CHAT_ID }}
+          message: |
+            *${{ github.event_name == 'issue_comment' && 'Comment on Pull Request' || 'Pull Request Update' }}*
+            Event: ${{ github.event_name == 'issue_comment' && 'commented' || github.event.action }}
+            ${{ github.event_name == 'issue_comment' && format('Comment: {0}', github.event.comment.body) || format('PR: [{0}]({1})', github.event.pull_request.title, github.event.pull_request.html_url) }}
+            Repository: [${{ github.repository }}](https://github.com/${{ github.repository }})
+            By: ${{ github.actor }}
+            ${{ github.event_name == 'issue_comment' && format('Comment URL: {0}', github.event.comment.html_url) || format('Commit: [{0}]({1})', github.event.pull_request.head.sha, github.event.pull_request.head.sha) }}
