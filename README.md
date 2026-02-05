@@ -92,4 +92,4 @@ Contributions are welcome! Please open issues or submit pull requests for improv
 
 ## License
 
-This project is licensed under the DUMA TEAM License.
+This project is licensed under the Khemra Tech TEAM License.
