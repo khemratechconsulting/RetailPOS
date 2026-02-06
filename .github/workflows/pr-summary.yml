@@ -139,7 +139,7 @@ jobs:
       - name: Send Notification
         uses: EverythingSuckz/github-telegram-notify@main
         with:
-          bot_token: ${{ secrets.TELEGRAM_BOT_TOKEN }}
+          bot_token: ${{ secrets.TELEGRAM_TOKEN }}
           chat_id: ${{ secrets.TELEGRAM_CHAT_ID }}
           message: |
             *${{ github.event_name == 'issue_comment' && 'Comment on Pull Request' || 'Pull Request Update' }}*
