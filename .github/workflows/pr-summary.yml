@@ -12,58 +12,70 @@ permissions:
 
 jobs:
   # 1. Generate summary and new PR title
-  summarize-and-rename:
-    if: github.event_name == 'pull_request' && github.event.action != 'closed'
-    runs-on: ubuntu-latest
-    steps:
-      - name: Checkout repository
-        uses: actions/checkout@v4
-        with:
-          fetch-depth: 0
-      - name: Set up Node.js
-        uses: actions/setup-node@v4
-        with:
-          node-version: '20'
-      - name: Install dependencies
-        run: npm install @octokit/rest diff
-      - name: Summarize and Rename
-        env:
-          GITHUB_TOKEN: ${{ secrets.GITHUB_TOKEN }}
-          PR_NUMBER: ${{ github.event.pull_request.number }}
-        run: |
-          node <<'EOF'
-          const { Octokit } = require("@octokit/rest");
-          const octokit = new Octokit({ auth: process.env.GITHUB_TOKEN });
-          const [owner, repo] = process.env.GITHUB_REPOSITORY.split("/");
-          const prNumber = parseInt(process.env.PR_NUMBER, 10);
+    - name: Summarize and Rename
+      env:
+        GITHUB_TOKEN: ${{ secrets.GITHUB_TOKEN }}
+        PR_NUMBER: ${{ github.event.pull_request.number }}
+      run: |
+        node <<'EOF'
+        const { Octokit } = require("@octokit/rest");
+        const octokit = new Octokit({ auth: process.env.GITHUB_TOKEN });
+        const [owner, repo] = process.env.GITHUB_REPOSITORY.split("/");
+        const prNumber = parseInt(process.env.PR_NUMBER, 10);
+        // Prefixes to check
+        const PREFIXES = ['feat:', 'fix:', 'chore:', 'docs:', 'style:', 'refactor:', 'perf:', 'test:', 'build:', 'ci:'];
 
-          (async () => {
-            try {
-              const { data: pr } = await octokit.pulls.get({ owner, repo, pull_number: prNumber });
-              const { data: files } = await octokit.pulls.listFiles({ owner, repo, pull_number: prNumber });
-              
-              // 1. Generate Summary
-              let changes = '### Changes\n';
-              for (const f of files.slice(0, 10)) {
-                if (f.patch) changes += `**${f.filename}**: Updated logic.\n`;
+        (async () => {
+          try {
+            const { data: pr } = await octokit.pulls.get({ owner, repo, pull_number: prNumber });
+            const { data: files } = await octokit.pulls.listFiles({ owner, repo, pull_number: prNumber });
+            
+            // 1. Generate Summary
+            let changes = '### Changes\n';
+            for (const f of files.slice(0, 10)) {
+              if (f.patch) changes += `**${f.filename}**: Updated logic.\n`;
+            }
+            const summary = `## PR Summary\n\nAutomated summary of changes.\n\n${changes}`;
+            
+            // 2. Flexible Title Prefix
+            let newTitle = pr.title;
+            let hasPrefix = PREFIXES.some(prefix => pr.title.toLowerCase().startsWith(prefix));
+            
+            if (!hasPrefix) {
+              // Infer prefix based on files changed
+              let inferred = 'chore:'; // default
+              const filenames = files.map(f => f.filename);
+              if (filenames.some(name => /\.(js|ts|jsx|tsx|java|py|go|rb|php)$/.test(name))) {
+                inferred = 'feat:';
+              } else if (filenames.some(name => name.toLowerCase().includes('readme') || name.toLowerCase().includes('docs/'))) {
+                inferred = 'docs:';
+              } else if (filenames.some(name => name.toLowerCase().includes('test/'))) {
+                inferred = 'test:';
+              } else if (filenames.some(name => /\.(css|scss|sass|less)$/.test(name))) {
+                inferred = 'style:';
               }
-              const summary = `## PR Summary\n\nAutomated summary of changes.\n\n${changes}`;
-              
-              // 2. Fix Title (Capitalize)
-              let newTitle = pr.title;
-              if (pr.title.includes(':')) {
-                const parts = pr.title.split(':');
-                let subject = parts[1].trim();
+              newTitle = `${inferred} ${pr.title.charAt(0).toUpperCase() + pr.title.slice(1)}`;
+            } else {
+              // Capitalize after prefix (existing logic)
+              const parts = pr.title.split(':');
+              if (parts.length > 1) {
+                const subject = parts[1].trim();
                 newTitle = `${parts[0].trim().toLowerCase()}: ${subject.charAt(0).toUpperCase() + subject.slice(1)}`;
               }
-
-              const updateData = { owner, repo, pull_number: prNumber, body: (pr.body || '').split('## PR Summary')[0] + summary };
-              if (pr.title !== newTitle) updateData.title = newTitle;
-              
-              await octokit.pulls.update(updateData);
-            } catch (e) { console.error(e); }
-          })();
-          EOF
+            }
+            
+            const updateData = { 
+              owner, 
+              repo, 
+              pull_number: prNumber, 
+              body: (pr.body || '').split('## PR Summary')[0] + summary 
+            };
+            if (pr.title !== newTitle) updateData.title = newTitle;
+            
+            await octokit.pulls.update(updateData);
+          } catch (e) { console.error(e); }
+        })();
+        EOF
 
   # 2. Check title (Final verification)
   check-title:
