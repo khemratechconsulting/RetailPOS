@@ -1,271 +1,151 @@
-name: Summarize Pull Request
+name: PR Automation
 
 on:
   pull_request:
-    types: [opened, synchronize, reopened]
+    types: [opened, review_requested, closed, edited, reopened, synchronize]
+  issue_comment:
+    types: [created]
 
 permissions:
-  contents: read
+  contents: write
   pull-requests: write
 
 jobs:
-  summarize-pr:
+  # 1. Generate summary and new PR title
+  summarize-and-rename:
     runs-on: ubuntu-latest
+    if: github.event_name == 'pull_request' && github.event.action != 'closed'
     steps:
-      - name: Configure Git User
-        run: |
-          git config --global user.email "action@github.com"
-          git config --global user.name "GitHub Action"
-
-      - name: Checkout repository
-        uses: actions/checkout@v4
-        with:
-          fetch-depth: 0
-
-      - name: Set up Node.js
-        uses: actions/setup-node@v4
-        with:
-          node-version: '20'
-
-      - name: Install dependencies
-        run: npm install @octokit/rest diff
-
-      - name: Summarize PR changes
+      - name: Summarize and Rename
         env:
           GITHUB_TOKEN: ${{ secrets.GITHUB_TOKEN }}
           PR_NUMBER: ${{ github.event.pull_request.number }}
         run: |
+          npm install @octokit/rest
           node <<'EOF'
           const { Octokit } = require("@octokit/rest");
-          const diff = require("diff");
           const octokit = new Octokit({ auth: process.env.GITHUB_TOKEN });
           const [owner, repo] = process.env.GITHUB_REPOSITORY.split("/");
           const prNumber = parseInt(process.env.PR_NUMBER, 10);
-
-          // Helper to analyze file diffs dynamically
-          function analyzeFileChanges(files) {
-            const summaries = [];
-            for (const file of files) {
-              const { filename, patch } = file;
-              let summary = { file: filename, changes: [] };
-
-              // Handle Prisma schema changes
-              if (filename.endsWith('schema.prisma')) {
-                const newFields = (patch.match(/\+.*?\w+\s+\w+\s*@default\([^\)]+\)/g) || [])
-                  .map(line => line.replace(/\+/, '').trim());
-                if (newFields.length > 0) {
-                  summary.changes.push(`Added new fields to schema: ${newFields.join(', ')}.`);
-                }
-                const modelChanges = (patch.match(/\+.*?(model|enum)\s+\w+/g) || [])
-                  .map(line => line.replace(/\+/, '').trim());
-                if (modelChanges.length > 0) {
-                  summary.changes.push(`Modified schema models or enums: ${modelChanges.join(', ')}.`);
-                }
-              }
-
-              // Handle controller changes
-              else if (filename.includes('controllers/') && filename.endsWith('.js')) {
-                const newMethods = (patch.match(/\+export const \w+Controller\s*=/g) || [])
-                  .map(line => line.replace(/\+export const /, '').replace(/\s*=/, '').trim());
-                if (newMethods.length > 0) {
-                  summary.changes.push(`Added or modified controller methods: ${newMethods.join(', ')}.`);
-                }
-                const removedMethods = (patch.match(/\-export const \w+\s*=/g) || [])
-                  .map(line => line.replace(/\-export const /, '').replace(/\s*=/, '').trim());
-                if (removedMethods.length > 0) {
-                  summary.changes.push(`Removed controller methods: ${removedMethods.join(', ')}.`);
-                }
-              }
-
-              // Handle route changes
-              else if (filename.includes('routes/') && filename.endsWith('.js')) {
-                const newRoutes = (patch.match(/\+router\.(get|post|put|delete)\(['"][^'"]+['"]/g) || [])
-                  .map(line => line.replace(/\+router\./, '').trim());
-                if (newRoutes.length > 0) {
-                  summary.changes.push(`Added new routes: ${newRoutes.map(r => r.split('(')[1].replace(/['"]/g, '')).join(', ')}.`);
-                }
-                const middlewareChanges = (patch.match(/\+.*?(authMiddleware|authenticateToken|checkPermission|checkMenuAccess)/g) || [])
-                  .map(line => line.match(/(authMiddleware|authenticateToken|checkPermission|checkMenuAccess)/)[0]);
-                if (middlewareChanges.length > 0) {
-                  summary.changes.push(`Added middleware to routes: ${[...new Set(middlewareChanges)].join(', ')}.`);
-                }
-              }
-
-              // Handle model changes
-              else if (filename.includes('models/') && filename.endsWith('.js')) {
-                const newFunctions = (patch.match(/\+async \w+\s*\(/g) || [])
-                  .map(line => line.replace(/\+async /, '').replace(/\s*\(/, '').trim());
-                if (newFunctions.length > 0) {
-                  summary.changes.push(`Added or modified model functions: ${newFunctions.join(', ')}.`);
-                }
-              }
-
-              // Handle seed changes
-              else if (filename.endsWith('seed.js')) {
-                const permissionChanges = (patch.match(/\+.*?(can\w+:\s*(true|false))/g) || [])
-                  .map(line => line.replace(/\+/, '').trim());
-                if (permissionChanges.length > 0) {
-                  summary.changes.push(`Updated seed data with permissions: ${permissionChanges.join(', ')}.`);
-                }
-                const roleChanges = (patch.match(/\+.*?(role|permissions):\s*\{/g) || [])
-                  .map(line => line.replace(/\+/, '').trim());
-                if (roleChanges.length > 0) {
-                  summary.changes.push(`Modified seed roles or permissions.`);
-                }
-              }
-
-              // Handle middleware changes
-              else if (filename.includes('middleware/') && filename.endsWith('.js')) {
-                const permissionChecks = (patch.match(/\+.*?(can\w+)/g) || [])
-                  .map(line => line.match(/can\w+/)[0]);
-                if (permissionChecks.length > 0) {
-                  summary.changes.push(`Added permission checks: ${[...new Set(permissionChecks)].join(', ')}.`);
-                }
-              }
-
-              // Handle generic JS/TS files
-              else if (filename.endsWith('.js') || filename.endsWith('.ts')) {
-                summary.changes.push('Modified application logic or functionality.');
-              }
-
-              // Handle JSON files
-              else if (filename.endsWith('.json')) {
-                summary.changes.push('Updated configuration or data file.');
-              }
-
-              if (summary.changes.length > 0) {
-                summaries.push(summary);
-              }
-            }
-            return summaries;
-          }
-
-          // Helper to generate PR summary dynamically
-          function generateSummary(pr, commits, fileSummaries) {
-            const commitMessages = commits.map(c => c.commit.message).join(' ').toLowerCase();
-            let overview = 'This pull request modifies the application by updating schema, controllers, routes, models, or seed data to enhance functionality or fix issues.';
-
-            // Infer overview from changes
-            const hasSchemaChanges = fileSummaries.some(s => s.file.endsWith('schema.prisma'));
-            const hasControllerChanges = fileSummaries.some(s => s.file.includes('controllers/'));
-            const hasRouteChanges = fileSummaries.some(s => s.file.includes('routes/'));
-            const hasModelChanges = fileSummaries.some(s => s.file.includes('models/'));
-            const hasSeedChanges = fileSummaries.some(s => s.file.endsWith('seed.js'));
-
-            if (hasSchemaChanges && hasControllerChanges && hasRouteChanges) {
-              overview = 'This pull request enhances the application by adding new schema fields, updating controllers, and introducing new routes.';
-            } else if (hasSchemaChanges) {
-              overview = 'This pull request modifies the database schema to support new functionality.';
-            } else if (hasControllerChanges || hasRouteChanges) {
-              overview = 'This pull request updates API endpoints and controller logic.';
-            } else if (hasModelChanges) {
-              overview = 'This pull request updates model logic to support new features or fixes.';
-            } else if (hasSeedChanges) {
-              overview = 'This pull request updates seed data for roles, permissions, or other entities.';
-            }
-
-            if (commitMessages.includes('fix') || commitMessages.includes('bug')) {
-              overview = overview.replace('enhances', 'fixes issues in').replace('adding', 'fixing').replace('updates', 'corrects');
-            } else if (commitMessages.includes('feature')) {
-              overview = overview.replace('modifies', 'adds new features to');
-            }
-
-            let changes = '### Changes\n';
-            for (const summary of fileSummaries) {
-              changes += `**${summary.file}**:\n`;
-              changes += summary.changes.map(c => `- ${c}`).join('\n') + '\n\n';
-            }
-
-            const impact = '### Impact\n';
-            let impactDetails = [];
-            if (hasSchemaChanges) {
-              impactDetails.push('- Modified database schema, potentially requiring migrations.');
-            }
-            if (hasControllerChanges) {
-              impactDetails.push('- Updated controller logic, affecting API behavior.');
-            }
-            if (hasRouteChanges) {
-              impactDetails.push('- Added or modified API routes, impacting endpoint availability.');
-            }
-            if (hasModelChanges) {
-              impactDetails.push('- Updated model logic, affecting data operations.');
-            }
-            if (hasSeedChanges) {
-              impactDetails.push('- Updated seed data, affecting initial database state.');
-            }
-            impactDetails.push('- Compatibility: Review changes to ensure no breaking changes.');
-            impactDetails.push('- Future: May require frontend or additional backend updates.');
-
-            const testing = '### Testing Instructions\n';
-            let testingSteps = [];
-            if (hasSchemaChanges) {
-              testingSteps.push('1. Run `npx prisma migrate dev --name update-schema` to apply schema changes.');
-            }
-            if (hasSeedChanges) {
-              testingSteps.push('2. Run `node src/prisma/seed.js` to update seed data.');
-            }
-            if (hasRouteChanges || hasControllerChanges) {
-              testingSteps.push('3. Test modified API endpoints using tools like `curl` or Postman.');
-              testingSteps.push('4. Verify authentication and permission checks for routes (e.g., `GET /api/users/me`, `GET /api/roles`).');
-            }
-            testingSteps.push('5. Ensure existing functionality remains intact.');
-            testingSteps.push('6. Test with different user roles (e.g., Admin, President, Advisor) to verify permissions.');
-
-            return `## PR Summary\n\n${overview}\n\n${changes}${impact}${impactDetails.join('\n')}\n\n${testing}${testingSteps.join('\n')}`;
-          }
-
-          // Helper to update PR description without overwriting
-          async function updatePRDescription(pr, newSummary) {
-            let body = pr.body || '';
-            const summaryHeader = '## PR Summary';
-            if (body.includes(summaryHeader)) {
-              body = body.substring(0, body.indexOf(summaryHeader)) + newSummary;
-            } else {
-              body = (body ? body + '\n\n' : '') + newSummary;
-            }
-            await octokit.pulls.update({
-              owner,
-              repo,
-              pull_number: prNumber,
-              body,
-            });
-          }
+          // Prefixes to check
+          const PREFIXES = ['feat:', 'fix:', 'chore:', 'docs:', 'style:', 'refactor:', 'perf:', 'test:', 'build:', 'ci:'];
 
           (async () => {
             try {
-              // Get pull request details
-              const { data: pr } = await octokit.pulls.get({
-                owner,
-                repo,
-                pull_number: prNumber,
-              });
+              const { data: pr } = await octokit.pulls.get({ owner, repo, pull_number: prNumber });
+              const { data: files } = await octokit.pulls.listFiles({ owner, repo, pull_number: prNumber });
+              
+              // 1. Generate Summary
+              let changes = '### Changes\n';
+              for (const f of files.slice(0, 10)) {
+                if (f.patch) changes += `**${f.filename}**: Updated logic.\n`;
+              }
+              const summary = `## PR Summary\n\nAutomated summary of changes.\n\n${changes}`;
+              
+              // 2. Flexible Title Prefix
+              let newTitle = pr.title;
+              let hasPrefix = PREFIXES.some(prefix => pr.title.toLowerCase().startsWith(prefix));
+              
+            if (!hasPrefix) {
+              // Infer prefix based on files changed and title keywords
+              let inferred = 'chore:'; 
+              const filenames = files.map(f => f.filename);
+              const titleLower = pr.title.toLowerCase();
 
-              // Get commits
-              const { data: commits } = await octokit.pulls.listCommits({
-                owner,
-                repo,
-                pull_number: prNumber,
-              });
+              // 1. Check for bug fixes first
+              if (titleLower.includes('fix') || titleLower.includes('bug') || titleLower.includes('solve')) {
+                inferred = 'fix:';
+              } 
+              // 2. Check for CI/CD changes
+              else if (filenames.some(name => name.includes('.github/workflows') || name.includes('docker') || name.includes('jenkins'))) {
+                inferred = 'ci:';
+              }
+              // 3. Check for documentation
+              else if (filenames.some(name => name.toLowerCase().includes('readme') || name.toLowerCase().includes('docs/') || name.endsWith('.md'))) {
+                inferred = 'docs:';
+              }
+              // 4. Check for tests
+              else if (filenames.some(name => name.toLowerCase().includes('test/') || name.includes('.test.') || name.includes('.spec.'))) {
+                inferred = 'test:';
+              }
+              // 5. Check for styling
+              else if (filenames.some(name => /\.(css|scss|sass|less)$/.test(name))) {
+                inferred = 'style:';
+              }
+              // 6. Check for scripts/build tools
+              else if (filenames.some(name => ['package.json', 'package-lock.json', 'yarn.lock', 'webpack.config.js', 'babel.config.js'].includes(name))) {
+                inferred = 'build:';
+              }
+              // 7. Check for feature (code changes)
+              else if (filenames.some(name => /\.(js|ts|jsx|tsx|java|py|go|rb|php|swift|kotlin|cpp|h|c|cs)$/.test(name))) {
+                inferred = 'feat:';
+              }
 
-              // Get changed files with diffs
-              const { data: files } = await octokit.pulls.listFiles({
-                owner,
-                repo,
-                pull_number: prNumber,
-              });
-
-              // Analyze changes
-              const fileSummaries = analyzeFileChanges(files);
-
-              // Generate and update summary
-              const summary = generateSummary(pr, commits, fileSummaries);
-              await updatePRDescription(pr, summary);
-
-              console.log("Pull request description updated successfully.");
-            } catch (error) {
-              console.error("Error updating PR description:", error.message);
-              console.error("Error details:", JSON.stringify(error, null, 2));
+              newTitle = `${inferred} ${pr.title.charAt(0).toUpperCase() + pr.title.slice(1)}`;
+            } else {
+                // Capitalize after prefix (existing logic)
+                const parts = pr.title.split(':');
+                if (parts.length > 1) {
+                  const subject = parts[1].trim();
+                  newTitle = `${parts[0].trim().toLowerCase()}: ${subject.charAt(0).toUpperCase() + subject.slice(1)}`;
+                }
+              }
+              
+              const updateData = { 
+                owner, 
+                repo, 
+                pull_number: prNumber, 
+                body: (pr.body || '').split('## PR Summary')[0] + summary 
+              };
+              if (pr.title !== newTitle) updateData.title = newTitle;
+              
+              await octokit.pulls.update(updateData);
+            } catch (e) { 
+              console.error(e);
               process.exit(1);
             }
           })();
           EOF
+
+  # 2. Check title (Final verification)
+  check-title:
+    needs: [summarize-and-rename]
+    if: always() && github.event_name == 'pull_request' && github.event.action != 'closed'
+    runs-on: ubuntu-latest
+    steps:
+      - uses: amannn/action-semantic-pull-request@v5
+        env:
+          GITHUB_TOKEN: ${{ secrets.GITHUB_TOKEN }}
+        with:
+          types: |
+            feat
+            fix
+            chore
+            docs
+            style
+            refactor
+            perf
+            test
+            build
+            ci
+          subjectPattern: ^(?![a-z]).+$
+
+  # 3. Notify Telegram (Sequenced for PRs, Independent for Comments)
+  notify-telegram:
+    needs: [check-title]
+    if: always() && (github.event_name == 'pull_request' || (github.event_name == 'issue_comment' && github.event.issue.pull_request))
+    runs-on: ubuntu-latest
+    steps:
+      - name: Send Notification
+        uses: EverythingSuckz/github-telegram-notify@main
+        with:
+          bot_token: ${{ secrets.TELEGRAM_TOKEN }}
+          chat_id: ${{ secrets.TELEGRAM_CHAT_ID }}
+          message: |
+            *${{ github.event_name == 'issue_comment' && 'Comment on Pull Request' || 'Pull Request Update' }}*
+            Event: ${{ github.event_name == 'issue_comment' && 'commented' || (github.event.pull_request && (github.event.pull_request.merged && 'merged' || github.event.action) || 'update') }}
+            Repository: [${{ github.repository }}](https://github.com/${{ github.repository }})
+            By: ${{ github.actor }}
+            
+            ${{ github.event_name == 'issue_comment' && format('Comment: {0}', github.event.comment.body) || (github.event.pull_request && format('PR: [{0}]({1})', github.event.pull_request.title, github.event.pull_request.html_url) || '') }}
+            ${{ github.event_name == 'issue_comment' && format('URL: {0}', github.event.comment.html_url) || (github.event.pull_request && format('Commit: {0}', github.event.pull_request.head.sha) || '') }}
