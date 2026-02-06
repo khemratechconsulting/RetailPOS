@@ -12,70 +12,100 @@ permissions:
 
 jobs:
   # 1. Generate summary and new PR title
-    - name: Summarize and Rename
-      env:
-        GITHUB_TOKEN: ${{ secrets.GITHUB_TOKEN }}
-        PR_NUMBER: ${{ github.event.pull_request.number }}
-      run: |
-        node <<'EOF'
-        const { Octokit } = require("@octokit/rest");
-        const octokit = new Octokit({ auth: process.env.GITHUB_TOKEN });
-        const [owner, repo] = process.env.GITHUB_REPOSITORY.split("/");
-        const prNumber = parseInt(process.env.PR_NUMBER, 10);
-        // Prefixes to check
-        const PREFIXES = ['feat:', 'fix:', 'chore:', 'docs:', 'style:', 'refactor:', 'perf:', 'test:', 'build:', 'ci:'];
+  summarize-and-rename:
+    runs-on: ubuntu-latest
+    if: github.event_name == 'pull_request' && github.event.action != 'closed'
+    steps:
+      - name: Summarize and Rename
+        env:
+          GITHUB_TOKEN: ${{ secrets.GITHUB_TOKEN }}
+          PR_NUMBER: ${{ github.event.pull_request.number }}
+        run: |
+          npm install @octokit/rest
+          node <<'EOF'
+          const { Octokit } = require("@octokit/rest");
+          const octokit = new Octokit({ auth: process.env.GITHUB_TOKEN });
+          const [owner, repo] = process.env.GITHUB_REPOSITORY.split("/");
+          const prNumber = parseInt(process.env.PR_NUMBER, 10);
+          // Prefixes to check
+          const PREFIXES = ['feat:', 'fix:', 'chore:', 'docs:', 'style:', 'refactor:', 'perf:', 'test:', 'build:', 'ci:'];
 
-        (async () => {
-          try {
-            const { data: pr } = await octokit.pulls.get({ owner, repo, pull_number: prNumber });
-            const { data: files } = await octokit.pulls.listFiles({ owner, repo, pull_number: prNumber });
-            
-            // 1. Generate Summary
-            let changes = '### Changes\n';
-            for (const f of files.slice(0, 10)) {
-              if (f.patch) changes += `**${f.filename}**: Updated logic.\n`;
-            }
-            const summary = `## PR Summary\n\nAutomated summary of changes.\n\n${changes}`;
-            
-            // 2. Flexible Title Prefix
-            let newTitle = pr.title;
-            let hasPrefix = PREFIXES.some(prefix => pr.title.toLowerCase().startsWith(prefix));
-            
+          (async () => {
+            try {
+              const { data: pr } = await octokit.pulls.get({ owner, repo, pull_number: prNumber });
+              const { data: files } = await octokit.pulls.listFiles({ owner, repo, pull_number: prNumber });
+              
+              // 1. Generate Summary
+              let changes = '### Changes\n';
+              for (const f of files.slice(0, 10)) {
+                if (f.patch) changes += `**${f.filename}**: Updated logic.\n`;
+              }
+              const summary = `## PR Summary\n\nAutomated summary of changes.\n\n${changes}`;
+              
+              // 2. Flexible Title Prefix
+              let newTitle = pr.title;
+              let hasPrefix = PREFIXES.some(prefix => pr.title.toLowerCase().startsWith(prefix));
+              
             if (!hasPrefix) {
-              // Infer prefix based on files changed
-              let inferred = 'chore:'; // default
+              // Infer prefix based on files changed and title keywords
+              let inferred = 'chore:'; 
               const filenames = files.map(f => f.filename);
-              if (filenames.some(name => /\.(js|ts|jsx|tsx|java|py|go|rb|php)$/.test(name))) {
-                inferred = 'feat:';
-              } else if (filenames.some(name => name.toLowerCase().includes('readme') || name.toLowerCase().includes('docs/'))) {
+              const titleLower = pr.title.toLowerCase();
+
+              // 1. Check for bug fixes first
+              if (titleLower.includes('fix') || titleLower.includes('bug') || titleLower.includes('solve')) {
+                inferred = 'fix:';
+              } 
+              // 2. Check for CI/CD changes
+              else if (filenames.some(name => name.includes('.github/workflows') || name.includes('docker') || name.includes('jenkins'))) {
+                inferred = 'ci:';
+              }
+              // 3. Check for documentation
+              else if (filenames.some(name => name.toLowerCase().includes('readme') || name.toLowerCase().includes('docs/') || name.endsWith('.md'))) {
                 inferred = 'docs:';
-              } else if (filenames.some(name => name.toLowerCase().includes('test/'))) {
+              }
+              // 4. Check for tests
+              else if (filenames.some(name => name.toLowerCase().includes('test/') || name.includes('.test.') || name.includes('.spec.'))) {
                 inferred = 'test:';
-              } else if (filenames.some(name => /\.(css|scss|sass|less)$/.test(name))) {
+              }
+              // 5. Check for styling
+              else if (filenames.some(name => /\.(css|scss|sass|less)$/.test(name))) {
                 inferred = 'style:';
               }
+              // 6. Check for scripts/build tools
+              else if (filenames.some(name => ['package.json', 'package-lock.json', 'yarn.lock', 'webpack.config.js', 'babel.config.js'].includes(name))) {
+                inferred = 'build:';
+              }
+              // 7. Check for feature (code changes)
+              else if (filenames.some(name => /\.(js|ts|jsx|tsx|java|py|go|rb|php|swift|kotlin|cpp|h|c|cs)$/.test(name))) {
+                inferred = 'feat:';
+              }
+
               newTitle = `${inferred} ${pr.title.charAt(0).toUpperCase() + pr.title.slice(1)}`;
             } else {
-              // Capitalize after prefix (existing logic)
-              const parts = pr.title.split(':');
-              if (parts.length > 1) {
-                const subject = parts[1].trim();
-                newTitle = `${parts[0].trim().toLowerCase()}: ${subject.charAt(0).toUpperCase() + subject.slice(1)}`;
+                // Capitalize after prefix (existing logic)
+                const parts = pr.title.split(':');
+                if (parts.length > 1) {
+                  const subject = parts[1].trim();
+                  newTitle = `${parts[0].trim().toLowerCase()}: ${subject.charAt(0).toUpperCase() + subject.slice(1)}`;
+                }
               }
+              
+              const updateData = { 
+                owner, 
+                repo, 
+                pull_number: prNumber, 
+                body: (pr.body || '').split('## PR Summary')[0] + summary 
+              };
+              if (pr.title !== newTitle) updateData.title = newTitle;
+              
+              await octokit.pulls.update(updateData);
+            } catch (e) { 
+              console.error(e);
+              process.exit(1);
             }
-            
-            const updateData = { 
-              owner, 
-              repo, 
-              pull_number: prNumber, 
-              body: (pr.body || '').split('## PR Summary')[0] + summary 
-            };
-            if (pr.title !== newTitle) updateData.title = newTitle;
-            
-            await octokit.pulls.update(updateData);
-          } catch (e) { console.error(e); }
-        })();
-        EOF
+          })();
+          EOF
 
   # 2. Check title (Final verification)
   check-title:
@@ -113,9 +143,9 @@ jobs:
           chat_id: ${{ secrets.TELEGRAM_CHAT_ID }}
           message: |
             *${{ github.event_name == 'issue_comment' && 'Comment on Pull Request' || 'Pull Request Update' }}*
-            Event: ${{ github.event_name == 'issue_comment' && 'commented' || (github.event.pull_request.merged && 'merged' || github.event.action) }}
+            Event: ${{ github.event_name == 'issue_comment' && 'commented' || (github.event.pull_request && (github.event.pull_request.merged && 'merged' || github.event.action) || 'update') }}
             Repository: [${{ github.repository }}](https://github.com/${{ github.repository }})
             By: ${{ github.actor }}
             
-            ${{ github.event_name == 'issue_comment' && format('Comment: {0}', github.event.comment.body) || format('PR: [{0}]({1})', github.event.pull_request.title, github.event.pull_request.html_url) }}
-            ${{ github.event_name == 'issue_comment' && format('URL: {0}', github.event.comment.html_url) || format('Commit: {0}', github.event.pull_request.head.sha) }}
+            ${{ github.event_name == 'issue_comment' && format('Comment: {0}', github.event.comment.body) || (github.event.pull_request && format('PR: [{0}]({1})', github.event.pull_request.title, github.event.pull_request.html_url) || '') }}
+            ${{ github.event_name == 'issue_comment' && format('URL: {0}', github.event.comment.html_url) || (github.event.pull_request && format('Commit: {0}', github.event.pull_request.head.sha) || '') }}
